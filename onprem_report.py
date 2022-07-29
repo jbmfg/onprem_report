@@ -226,7 +226,6 @@ def table_creations():
     """
     db.execute(query)
 
-
 def writerows(self, sheet, data, linkBool=False, setwid=True, col1url=False, bolder=False):
         bold = self.wb.add_format({"bold": True})
         # first get the length of the longest sting to set column widths
@@ -294,8 +293,6 @@ def write_report():
     products = set([product for products in product_groups for product in products.split(";")])
     for i in products: print(i)
     wb.close()
-
-
 
 if __name__ == "__main__":
     #table_creations()
