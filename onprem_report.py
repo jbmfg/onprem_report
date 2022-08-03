@@ -24,6 +24,7 @@ class report_data(object):
         where a.cs_tier__c in ('Low', 'Medium', 'High', 'Holding')
         and i.product_group__c in ('Cb Protection', 'Cb Response', 'Cb Response Cloud')
         and i.installation_type__c in ('Perpetual', 'Subscription')
+        and i.install_type__c in ('Partner', 'MSSP - Cb Protection', 'IR - Carbon Black', 'Other', 'General Availability', 'Bit9 Deployment', 'Initial purchase')
         """
         data = self.sfdb.execute(query)
 
@@ -74,6 +75,7 @@ class report_data(object):
         a.GS_CSM_Meter_Score__c,
         a.csm_meter_comments__c,
         a.GS_Overall_Score__c,
+        a.gs_adoption_comments__c,
         csm.name,
         cse.name
         from edw_tesseract.sbu_ref_sbusfdc.account a
@@ -82,7 +84,8 @@ class report_data(object):
         where a.account_id_18_digits__c in ({accts})
         """
         data = self.sfdb.execute(query)
-        fields = ("acct_id", "tier", "arr", "account_name", "csm_score", "csm_comments", "gs_score", "csm", "cse")
+        fields = ["acct_id", "tier", "arr", "account_name", "csm_score", "csm_comments"]
+        fields += ["gs_score", "adoption_comments", "csm", "cse"]
         self.db.insert("accounts", fields, data)
 
     def get_opportunity_info(self):
@@ -178,6 +181,9 @@ class report_data(object):
         fields = ("inst_id", "deployment")
         self.db.update("installations", fields, deployments)
 
+    def acct_rollup(self):
+        print(json.dumps(self.act_dict, indent=2))
+
 def table_creations():
     db = sqlite_db("onprem_products.db")
     for table in ("installations", "accounts", "opportunities"):
@@ -207,6 +213,7 @@ def table_creations():
     csm_score INTEGER DEFAULT 0 CHECK (typeof(csm_score) in ('integer', Null)),
     csm_comments TEXT,
     gs_score INTEGER DEFAULT 0 CHECK (typeof(gs_score) in ('integer', Null)),
+    adoption_comments TEXT,
     csm TEXT,
     cse TEXT
     );
@@ -226,8 +233,8 @@ def table_creations():
     """
     db.execute(query)
 
-def writerows(self, sheet, data, linkBool=False, setwid=True, col1url=False, bolder=False):
-        bold = self.wb.add_format({"bold": True})
+def writerows(wb, sheet, data, linkBool=False, setwid=True, col1url=False, bolder=False):
+        bold = wb.add_format({"bold": True})
         # first get the length of the longest sting to set column widths
         numCols = len(data[0])
         widest = [10 for _ in range(numCols)]
@@ -284,24 +291,52 @@ def write_report():
     db = sqlite_db("onprem_products.db")
     wb = xlsxwriter.Workbook("On-Prem Products_Consumption Report.xlsx")
     lookup = {"Cb Response Cloud": "HEDR", "Cb Protection": "AC", "Cb Response": "EDR"}
+    type_lookup = {"Cb Response Cloud": "cbrc", "Cb Protection": "cbp", "Cb Response": "cbr"}
     for product in [i[0] for i in db.execute("select distinct product from installations;")]:
         sheet = wb.add_worksheet(lookup[product])
-        query = """
+        query = f"""
         select
+        a.account_name as "Account Name",
+        a.csm_score as "CSM Score",
+        a.csm_comments as "CSM Comments",
+        a.gs_score as "GS Score",
+        a.tier as "Tier",
+        a.arr as "ARR",
+        a.csm as "CSM",
+        a.cse as "CSE",
+        i.licenses_purchased as "Licenses",
+        i.normalized_host_count as "Normalized Host Count",
+        i.deployment as "Deployment %",
+        i.last_contact as "Last Connection",
+        o.forecast as "Forecast",
+        o.close_date as "Renewal Date",
+        o.renewal_qt as "Renewal Quarter",
+        i.inst_id
+        left join accounts a on i.account_id = a.acct_id
+        left join opportunities o on i.account_id = o.acct_id
+        where i.product = '{product}'
+        and o.type like '%{type_lookup[product]}%';
         """
+        print(query)
+        data = db.execute_dict(query)
+        data = sorted(data, key=lambda x: x[0])
+        header = data[0].keys()
+        data.insert(0, header)
+        writerows(wb, sheet, data)
     product_groups = [i[0] for i in db.execute("select distinct type from opportunities")]
     products = set([product for products in product_groups for product in products.split(";")])
     for i in products: print(i)
     wb.close()
 
 if __name__ == "__main__":
-    #table_creations()
-    #rd = report_data()
-    #rd.get_installation_info()
-    #rd.get_account_info()
-    #rd.get_opportunity_info()
-    #rd.renewal_quarter()
-    #rd.deployment_percentage()
+    table_creations()
+    rd = report_data()
+    rd.get_installation_info()
+    rd.get_account_info()
+    rd.get_opportunity_info()
+    rd.renewal_quarter()
+    rd.deployment_percentage()
+    rd.acct_rollup()
     write_report()
 
 

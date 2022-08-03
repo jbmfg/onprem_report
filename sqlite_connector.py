@@ -33,30 +33,17 @@ class sqlite_db(object):
         self.cursor.execute(query)
         data = self.cursor.fetchall()
         self.connection.commit()
-        #self.cursor.close()
         return data
 
     def execute_dict(self, query):
-        # Returns a dictionary of variable length. Original function called lower on all keys
-        # If only one nest, it returns a list.  Otherwise returns an integer
+        self.connection.row_factory = sqlite3.Row
+        self.cursor = self.connection.cursor()
         self.cursor.execute(query)
-        self.connection.commit()
         data = self.cursor.fetchall()
-        if not data:
-            d = {}
-        elif len(data[0]) == 4:
-            d = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-            for r in data:
-                d[r[0]][str(r[1])][str(r[2])] = r[3]
-        elif len(data[0]) == 3:
-            d = defaultdict(lambda: defaultdict(int))
-            for r in data:
-                d[r[0]][str(r[1])] = r[2]
-        elif len(data[0]) == 2:
-            d = defaultdict(list)
-            for r in data:
-                d[str(r[0])].append(r[1])
-        return d
+        self.connection.commit()
+        self.connection.row_factory = None
+        self.cursor = self.connection.cursor()
+        return data
 
     def chunks(self, data, rows=CHUNKS):
             for i in range(0, len(data), rows):
