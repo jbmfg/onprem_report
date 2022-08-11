@@ -49,7 +49,7 @@ class sqlite_db(object):
             for i in range(0, len(data), rows):
                 yield data[i:i+rows]
 
-    def insert(self, table, fields, data, del_table=True):
+    def insert(self, table, fields, data, del_table=False):
         start = time.time()
         # data is a list of lists with the primary key as the first item
         if del_table: self.execute(f"DELETE from {table};")
@@ -136,7 +136,7 @@ class sqlite_db(object):
                     if x == 0 : continue
                     #if not i and i != 0:
                     #    continue
-                    if isinstance(i, float):
+                    if isinstance(i, float) or isinstance(i, int):
                         pass
                     elif i is None:
                         i = "NULL"

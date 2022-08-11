@@ -1,6 +1,9 @@
 import json
 import trino
 import xlsxwriter
+import dateparser
+import os
+import openpyxl
 from collections import defaultdict
 from sqlite_connector import sqlite_db
 from tesseract_connector import tesseract_connection
@@ -129,6 +132,25 @@ class report_data(object):
         fields += ["quantity", "sub_term", "tcv"]
         self.db.insert("subscriptions", fields, data)
 
+    def get_cta_info(self):
+        accts = "'" + "', '".join(self.act_dict.keys()) + "'"
+        for cta_type in ("Product Usage Analytics", "Tech Assessment", "CSA Whiteboarding"):
+            fields = ("acct_id", "cta_type", "closed_date", "status")
+            query = f"""
+            select account_id,
+            '{cta_type}',
+            max(closed_date),
+            case when status in ('New','Work In Progress') then 'Open' else 'Closed' end
+            from edw_tesseract.sbu_ref_sbusfdc.gsctadataset
+            where reason like '{cta_type}'
+            and account_id in ({accts})
+            and status not in ('Closed No Action', 'Closed Unsuccessful', 'Closed Invalid')
+            group by account_id, status, closed_date
+            """
+            data = self.sfdb.execute(query)
+            self.db.insert("ctas", fields, data)
+
+
     def renewal_quarter(self):
         def lookup_q(opp_date):
             formatstr = "%Y-%m-%d"
@@ -200,9 +222,20 @@ class report_data(object):
             else:
                 continue
             deployments.append([i[0], deployment])
-        for i in deployments: print(i)
         fields = ("inst_id", "deployment")
         self.db.update("installations", fields, deployments)
+
+    def air_gapped(self):
+        query = """
+        select
+        i.inst_id,
+        case when i.last_contact > DATE('NOW', '-5 Days') then False else True end
+        from installations i ;
+        """
+        data = self.db.execute(query)
+        for i in data: print(i)
+        fields = ("inst_id", "air_gapped")
+        self.db.update("installations", fields, data)
 
     def product_family(self):
         query = "select distinct type from opportunities;"
@@ -210,10 +243,36 @@ class report_data(object):
         products = set([i for prods in data for i in prods.split(";")])
         for i in products: print(i)
 
+    def get_activity(self):
+        xlsx_files = [i for i in os.listdir() if i.endswith(".xlsx") and i.startswith("Distinct")]
+        data = []
+        for f in xlsx_files:
+            wb = openpyxl.load_workbook(f, data_only=True)
+            s = wb["Mda Sheet"]
+            for x, i in enumerate(s.rows):
+                account = s.cell(row=x+1, column=1).value
+                act_date = s.cell(row=x+1, column=6).value
+                act_date = dateparser.parse(act_date)
+                if not act_date:
+                    continue
+                act_date = datetime.strftime(act_date, "%Y-%m-%d")
+                data.append([account, act_date])
+        fields = ["acct_id", "activity_date"]
+        self.db.insert("cse_activity", fields, data)
+
 def table_creations():
     db = sqlite_db("onprem_products.db")
-    for table in ("installations", "accounts", "opportunities", "subscriptions"):
+    for table in ("installations", "accounts", "opportunities", "subscriptions", "cse_activity", "ctas"):
         db.execute(f"drop table if exists {table};")
+
+    # CSE Timeline Activities
+    query = """
+    CREATE table cse_activity(
+    acct_id TEXT,
+    activity_date TEXT
+    );
+    """
+    db.execute(query)
 
     # Installations
     query = """
@@ -224,7 +283,8 @@ def table_creations():
     deployment TEXT DEFAULT Null,
     last_contact STRING,
     acct_id STRING,
-    product STRING
+    product STRING,
+    air_gapped INTEGER DEFAULT Null CHECK (typeof(air_gapped) in ('integer', Null))
     );
     """
     db.execute(query)
@@ -273,6 +333,16 @@ def table_creations():
     quantity INTEGER CHECK (typeof(quantity) in ('integer')),
     sub_term INTEGER CHECK (typeof(sub_term) in ('integer')),
     tcv REAL CHECK (typeof(tcv) in ('real'))
+    );
+    """
+    db.execute(query)
+
+    query = """
+    CREATE table ctas(
+    acct_id TEXT,
+    cta_type TEXT,
+    closed_date TEXT,
+    status TEXT
     );
     """
     db.execute(query)
@@ -331,115 +401,144 @@ def writerows(wb, sheet, data, linkBool=False, setwid=True, col1url=False, bolde
                 sheet.write_url(0, 6, "internal:Master!A1", string="Mastersheet")
         return True
 
-def create_inst_master(db):
-    def add_metric(metric):
-        pass
-    inst_ids = [i[0] for i in db.execute("select inst_id from installations;")]
+def create_inst_master(db, prod):
+    def add_metric(data_dict, new_data):
+        new_keys = []
+        for row in new_data:
+            row_tup = list(zip(row.keys(), [i for i in row]))
+            for i in row.keys(): new_keys.append(i)
+            inst_id = row_tup.pop(0)[1]
+            data_dict[inst_id].update(dict(row_tup))
+        for inst_id in data_dict:
+            for key in set(new_keys):
+                if key not in data_dict[inst_id]:
+                    data_dict[inst_id][key] = None
+        return data_dict
+
+    query = f"select inst_id from installations where product = '{prod}';"
+    inst_ids = [i[0] for i in db.execute(query)]
     rows = {i:{} for i in inst_ids}
+    rows = {}
+    rows = defaultdict(dict)
 
     # All of installations
-    data = db.execute_dict("select * from installations;")
-    for row in data:
-        row_tup = list(zip(row.keys(), [i for i in row]))
-        inst_id = row_tup.pop(0)[1]
-        rows[inst_id].update(dict(row_tup))
+    data = db.execute_dict(f"select * from installations where product = '{prod}';")
+    add_metric(rows, data)
 
     # All of accounts
-    query = """
+    query = f"""
     select i.inst_id, a.*
     from installations i
-    left join accounts a on i.acct_id = a.acct_id;
+    left join accounts a on i.acct_id = a.acct_id
+    where i.product = '{prod}';
     """
     data = db.execute_dict(query)
-    for row in data:
-        row_tup = list(zip(row.keys(), [i for i in row]))
-        inst_id = row_tup.pop(0)[1]
-        rows[inst_id].update(dict(row_tup))
+    add_metric(rows, data)
 
     # Those opportunities that apply *CBLO can be multiple so its omitted + wtf is other?
+    # Provides metrics related only to the next renewal for the product in question
     lookup = {
         "Cb Cloud": ["CBWL", "CBVM", "CBWS", "CBD", "CBCO", "CBTS", "CBTH"],
         "Cb Response Cloud": ["CBRC"],
         "Cb Protection": ["CBP"],
         "Cb Response": ["CBR"]
     }
-    for prod in lookup:
+    query = f"""
+    select i.inst_id,
+    o.close_date,
+    o.renewal_qt,
+    o.forecast,
+    o.acv as opp_acv,
+    count(*) as opp_count
+    from installations i
+    left join opportunities o on i.acct_id = o.acct_id
+    inner join
+        (select opp_id,
+        min(close_date) cd
+        from opportunities
+        group by opp_id ) o2
+        on o.opp_id = o2.opp_id and o.close_date = o2.cd
+    where i.product = '{prod}'
+    and o.type like '%{", ".join(lookup[prod])}%'
+    group by i.inst_id
+    order by o.close_date desc;
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # Arr from just the product in question
+    query = f"""
+    select i.inst_id,
+    round(sum(s.arr), 2) sub_product_arr
+    from installations i
+    left join subscriptions s on i.acct_id = s.acct_id and i.product = s.product
+    where 1=1
+    and i.product = '{prod}'
+    group by i.inst_id
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # CTAs from gainsight
+    for cta in ("Product Usage Analytics", "Tech Assessment", "CSA Whiteboarding"):
         query = f"""
         select i.inst_id,
-        o.close_date,
-        o.renewal_qt,
-        o.forecast,
-        o.acv as opp_acv,
-        count(*) as opp_count
+        c.closed_date as 'Last {cta}'
         from installations i
-        left join opportunities o on i.acct_id = o.acct_id
-        where i.product = '{prod}'
-        and o.type like '%{", ".join(lookup[prod])}%'
-        group by i.inst_id
-        having o.ROWID = min(o.ROWID)
-        order by o.close_date desc;
-        """
-        print(query)
-        data = db.execute(query)
-        for i in data:print(i)
-
-    #print(json.dumps(rows, indent=2))
-    return
-
-def write_report():
-    db = sqlite_db("onprem_products.db")
-    wb = xlsxwriter.Workbook("On-Prem Products_Consumption Report.xlsx")
-    lookup = {"Cb Response Cloud": "HEDR", "Cb Protection": "AC", "Cb Response": "EDR"}
-    type_lookup = {"Cb Response Cloud": "cbrc", "Cb Protection": "cbp", "Cb Response": "cbr"}
-    for product in [i[0] for i in db.execute("select distinct product from installations;")]:
-        sheet = wb.add_worksheet(lookup[product])
-        query = f"""
-        select
-        a.account_name as "Account Name",
-        a.csm_score as "CSM Score",
-        a.csm_comments as "CSM Comments",
-        a.gs_score as "GS Score",
-        a.tier as "Tier",
-        a.arr as "ARR",
-        a.csm as "CSM",
-        a.cse as "CSE",
-        i.licenses_purchased as "Licenses",
-        i.normalized_host_count as "Normalized Host Count",
-        i.deployment as "Deployment %",
-        i.last_contact as "Last Connection",
-        case when i.last_contact
-        o.forecast as "Forecast",
-        o.close_date as "Renewal Date",
-        o.renewal_qt as "Renewal Quarter",
-        i.inst_id
-        from installations i
-        left join accounts a on i.account_id = a.acct_id
-        left join opportunities o on i.account_id = o.acct_id
-        where i.product = '{product}'
-        and o.type like '%{type_lookup[product]}%';
+        left join ctas c on i.acct_id = c.acct_id
+        where c.cta_type = '{cta}'
+        and c.status = 'Closed'
+        and i.product = '{prod}'
         """
         data = db.execute_dict(query)
-        data = sorted(data, key=lambda x: x[0])
-        header = data[0].keys()
-        data.insert(0, header)
-        writerows(wb, sheet, data)
+        add_metric(rows, data)
+
+    # CSE Timeline activities
+    query = f"""
+    select i.inst_id,
+    cse.activity_date as 'last_timeline'
+    from installations i
+    left join accounts a on i.acct_id = a.acct_id
+    left join cse_activity cse on a.account_name = cse.acct_id
+    where i.product = '{prod}'
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+    print(json.dumps(rows, indent=2))
+
+    header = ["inst_id"] + list(rows[list(rows)[0]].keys())
+    rows = [[inst_id] + list(rows[inst_id].values()) for inst_id in rows]
+    rows.insert(0, header)
+    return rows
+
+def write_report(product, data):
+    db = sqlite_db("onprem_products.db")
+    lookup = {"Cb Response Cloud": "HEDR", "Cb Protection": "AC", "Cb Response": "EDR"}
+    type_lookup = {"Cb Response Cloud": "cbrc", "Cb Protection": "cbp", "Cb Response": "cbr"}
+    wb = xlsxwriter.Workbook(f"{product}_Consumption Report.xlsx")
+    sheet = wb.add_worksheet("Installations")
+    writerows(wb, sheet, data)
     product_groups = [i[0] for i in db.execute("select distinct type from opportunities")]
     products = set([product for products in product_groups for product in products.split(";")])
     for i in products: print(i)
     wb.close()
 
 if __name__ == "__main__":
-    create_inst_master(sqlite_db("onprem_products.db"))
+    for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
+        inst_data = create_inst_master(sqlite_db("onprem_products.db"), prod)
+        write_report(prod, inst_data)
     import sys
     sys.exit(1)
-    rd = report_data()
     table_creations()
     rd = report_data()
+    rd.get_activity()
     rd.get_installation_info()
     rd.get_account_info()
     rd.get_opportunity_info()
     rd.get_subscription_info()
+    rd.get_cta_info()
     rd.renewal_quarter()
     rd.deployment_percentage()
+    rd.air_gapped()
     rd.product_family()
     #write_report()
