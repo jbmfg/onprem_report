@@ -28,6 +28,8 @@ class report_data(object):
         and i.product_group__c in ('Cb Protection', 'Cb Response', 'Cb Response Cloud')
         and i.installation_type__c in ('Perpetual', 'Subscription')
         and i.install_type__c in ('Partner', 'MSSP - Cb Protection', 'IR - Carbon Black', 'Other', 'General Availability', 'Bit9 Deployment', 'Initial purchase')
+        and (i.cb_cloud_status__c not in ('Destroyed', 'Shutdown') or i.cb_cloud_status__c is null)
+        and (i.status__c in ('New', 'In-Progress', 'Complete') or i.status__c is null)
         """
         data = self.sfdb.execute(query)
 
@@ -150,7 +152,6 @@ class report_data(object):
             data = self.sfdb.execute(query)
             self.db.insert("ctas", fields, data)
 
-
     def renewal_quarter(self):
         def lookup_q(opp_date):
             formatstr = "%Y-%m-%d"
@@ -233,7 +234,6 @@ class report_data(object):
         from installations i ;
         """
         data = self.db.execute(query)
-        for i in data: print(i)
         fields = ("inst_id", "air_gapped")
         self.db.update("installations", fields, data)
 
@@ -241,7 +241,6 @@ class report_data(object):
         query = "select distinct type from opportunities;"
         data = [i[0] for i in self.db.execute(query)]
         products = set([i for prods in data for i in prods.split(";")])
-        for i in products: print(i)
 
     def get_activity(self):
         xlsx_files = [i for i in os.listdir() if i.endswith(".xlsx") and i.startswith("Distinct")]
@@ -252,7 +251,7 @@ class report_data(object):
             for x, i in enumerate(s.rows):
                 account = s.cell(row=x+1, column=1).value
                 act_date = s.cell(row=x+1, column=6).value
-                act_date = dateparser.parse(act_date)
+                act_date = dateparser.parse(act_date, settings={'TIMEZONE': 'UTC'})
                 if not act_date:
                     continue
                 act_date = datetime.strftime(act_date, "%Y-%m-%d")
@@ -262,7 +261,8 @@ class report_data(object):
 
 def table_creations():
     db = sqlite_db("onprem_products.db")
-    for table in ("installations", "accounts", "opportunities", "subscriptions", "cse_activity", "ctas"):
+    for table in ("installations", "accounts", "opportunities", "subscriptions",\
+                  "cse_activity", "ctas", "inst_summary", "acct_summary"):
         db.execute(f"drop table if exists {table};")
 
     # CSE Timeline Activities
@@ -347,6 +347,68 @@ def table_creations():
     """
     db.execute(query)
 
+    query = """
+    CREATE table inst_summary (
+    inst_id TEXT,
+    licenses_purchased INTEGER DEFAULT 0 CHECK (typeof(licenses_purchased) in ('integer', Null)),
+    normalized_host_count INTEGER DEFAULT 0 CHECK (typeof(normalized_host_count) in ('integer', Null)),
+    deployment REAL DEFAULT 0 CHECK (typeof(deployment) in ('REAL', Null)),
+    last_contact TEXT,
+    acct_id TEXT,
+    product TEXT,
+    air_gapped TEXT,
+    tier TEXT,
+    arr INTEGER DEFAULT 0 CHECK (typeof(arr) in ('integer', Null)),
+    account_name TEXT,
+    csm_score INTEGER DEFAULT 0 CHECK (typeof(csm_score) in ('integer', Null)),
+    csm_comments TEXT,
+    gs_score INTEGER DEFAULT 0 CHECK (typeof(gs_score) in ('integer', Null)),
+    adoption_comments TEXT,
+    csm TEXT,
+    cse TEXT,
+    close_date TEXT,
+    renewal_qt TEXT,
+    forecast TEXT,
+    opp_acv INTEGER DEFAULT 0 CHECK (typeof(opp_acv) in ('integer', Null)),
+    opp_count INTEGER DEFAULT 0 CHECK (typeof(opp_count) in ('integer', Null)),
+    sub_product_arr INTEGER DEFAULT 0 CHECK (typeof(sub_product_arr) in ('integer', Null)),
+    product_usage_analytics TEXT,
+    tech_assessment TEXT,
+    csa_whiteboarding TEXT,
+    last_timeline TEXT);
+    """
+    db.execute(query)
+
+    query = """
+    CREATE TABLE acct_summary (
+    acct_id TEXT,
+    tier TEXT,
+    arr INTEGER DEFAULT 0 CHECK (typeof(arr) in ('integer', Null)),
+    account_name TEXT,
+    csm_score INTEGER DEFAULT 0 CHECK (typeof(csm_score) in ('integer', Null)),
+    csm_comments TEXT,
+    gs_score INTEGER DEFAULT 0 CHECK (typeof(gs_score) in ('integer', Null)),
+    adoption_comments TEXT,
+    csm TEXT,
+    cse TEXT,
+    product TEXT,
+    last_timeline TEXT,
+    product_usage_analytics TEXT,
+    tech_assessment TEXT,
+    csa_whiteboarding TEXT,
+    connected_count INTEGER DEFAULT 0 CHECK (typeof(connected_count) in ('integer', Null)),
+    disconnected_count INTEGER DEFAULT 0 CHECK (typeof(disconnected_count) in ('integer', Null)),
+    renewal_date TEXT,
+    renewal_qt TEXT,
+    forecast TEXT,
+    product_acv INTEGER DEFAULT 0 CHECK (typeof(product_acv) in ('integer', Null)),
+    licenses_purchased INTEGER DEFAULT 0 CHECK (typeof(licenses_purchased) in ('integer', Null)),
+    sub_deployment_perc REAL DEFAULT 0 CHECK (typeof(sub_deployment_perc) in ('REAL', Null)),
+    inst_deployment_perc REAL DEFAULT 0 CHECK (typeof(inst_deployment_perc) in ('REAL', Null)),
+    products TEXT);
+    """
+    db.execute(query)
+
 def writerows(wb, sheet, data, linkBool=False, setwid=True, col1url=False, bolder=False):
         bold = wb.add_format({"bold": True})
         # first get the length of the longest sting to set column widths
@@ -412,13 +474,11 @@ def create_inst_master(db, prod):
         for inst_id in data_dict:
             for key in set(new_keys):
                 if key not in data_dict[inst_id]:
+                    # inst_id is the first level key, we dont need it in the value keys too
+                    if key == "inst_id": continue
                     data_dict[inst_id][key] = None
         return data_dict
 
-    query = f"select inst_id from installations where product = '{prod}';"
-    inst_ids = [i[0] for i in db.execute(query)]
-    rows = {i:{} for i in inst_ids}
-    rows = {}
     rows = defaultdict(dict)
 
     # All of installations
@@ -483,12 +543,13 @@ def create_inst_master(db, prod):
     for cta in ("Product Usage Analytics", "Tech Assessment", "CSA Whiteboarding"):
         query = f"""
         select i.inst_id,
-        c.closed_date as 'Last {cta}'
+        max(c.closed_date) as '{cta.lower().replace(" ", "_")}'
         from installations i
         left join ctas c on i.acct_id = c.acct_id
         where c.cta_type = '{cta}'
         and c.status = 'Closed'
         and i.product = '{prod}'
+        group by i.inst_id
         """
         data = db.execute_dict(query)
         add_metric(rows, data)
@@ -496,20 +557,199 @@ def create_inst_master(db, prod):
     # CSE Timeline activities
     query = f"""
     select i.inst_id,
-    cse.activity_date as 'last_timeline'
+    max(cse.activity_date) as 'last_timeline'
     from installations i
     left join accounts a on i.acct_id = a.acct_id
     left join cse_activity cse on a.account_name = cse.acct_id
     where i.product = '{prod}'
+    group by i.inst_id
     """
     data = db.execute_dict(query)
     add_metric(rows, data)
-    print(json.dumps(rows, indent=2))
 
-    header = ["inst_id"] + list(rows[list(rows)[0]].keys())
+    fields = ["inst_id"] + list(rows[list(rows)[0]].keys())
     rows = [[inst_id] + list(rows[inst_id].values()) for inst_id in rows]
-    rows.insert(0, header)
+    db.insert("inst_summary", fields, rows)
     return rows
+
+def create_acct_master(db, prod):
+    def add_metric(data_dict, new_data):
+        new_keys = []
+        for row in new_data:
+            row_tup = list(zip(row.keys(), [i for i in row]))
+            for i in row.keys(): new_keys.append(i)
+            acct_id = row_tup.pop(0)[1]
+            if acct_id not in data_dict: continue
+            data_dict[acct_id].update(dict(row_tup))
+        for acct_id in data_dict:
+            for key in set(new_keys):
+                if key not in data_dict[acct_id]:
+                    # acct_id is the first level key, we dont need it in the value keys too
+                    if key == "acct_id": continue
+                    data_dict[acct_id][key] = None
+        return data_dict
+
+    # Seed table with just the accounts that have the product in question
+    data = [i[0] for i in db.execute(f"select acct_id from installations where product = '{prod}';")]
+    rows = {i:{} for i in data}
+
+    # All of accounts table
+    data = db.execute_dict(f'select *, "{prod}" as product from accounts;')
+    add_metric(rows, data)
+
+    # CSE Timeline activities
+    query = """
+    select a.acct_id,
+    max(cse.activity_date) as 'last_timeline'
+    from accounts a
+    left join cse_activity cse on a.account_name = cse.acct_id
+    group by a.acct_id;
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # Ctas
+    for cta in ("Product Usage Analytics", "Tech Assessment", "CSA Whiteboarding"):
+        query = f"""
+        select a.acct_id,
+        max(c.closed_date) as '{cta.lower().replace(" ", "_")}'
+        from accounts a
+        left join ctas c on a.acct_id = c.acct_id
+        where c.cta_type = '{cta}'
+        and c.status = 'Closed'
+        group by a.acct_id;
+        """
+        data = db.execute_dict(query)
+        add_metric(rows, data)
+
+    # Deployment info from installations
+    query = f"""
+    select a.acct_id,
+    sum(case when i.air_gapped = 0 then i.normalized_host_count end) as connected_count,
+    sum(case when i.air_gapped = 1 then i.normalized_host_count end) as disconnected_count
+    from accounts a
+    left join installations i on a.acct_id = i.acct_id
+    where i.product = '{prod}'
+    group by a.acct_id;
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # Opportunities
+    lookup = {
+        "Cb Cloud": ["CBWL", "CBVM", "CBWS", "CBD", "CBCO", "CBTS", "CBTH"],
+        "Cb Response Cloud": ["CBRC"],
+        "Cb Protection": ["CBP"],
+        "Cb Response": ["CBR"]
+    }
+    query = f"""
+    select a.acct_id,
+    group_concat(o.close_date) as renewal_date,
+    group_concat(o.renewal_qt) as renewal_qt,
+    group_concat(o.forecast) as forecast,
+    sum(o.acv) as product_acv
+    from accounts a
+    left join opportunities o on a.acct_id = o.acct_id
+    where o.type like '%{", ".join(lookup[prod])}%'
+    group by a.acct_id;
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # purchased licenses from subscriptions
+    query = f"""
+    select acct_id,
+    sum(quantity) as licenses_purchased
+    from subscriptions
+    where product = '{prod}'
+    group by acct_id;
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # Calculated fields
+    # Deployment percentage from subscriptions
+    query = f"""
+    select hc.acct_id,
+    round(cast(nhc as real) / quan * 100, 2) as sub_deployment_perc
+    from (
+        select i.acct_id,
+        sum(i.normalized_host_count) nhc
+        from installations i
+        where i.product = '{prod}'
+        and i.air_gapped = 0
+        group by i.acct_id) as hc
+    join (
+        select s.acct_id,
+        sum(s.quantity) quan
+        from subscriptions s
+        where s.product = '{prod}'
+        group by s.acct_id) as ss on hc.acct_id = ss.acct_id
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # Deployment percentage by getting max from installation records
+    query = f"""
+    select hc.acct_id,
+    round(cast(nhc as real) / quan * 100, 2) as inst_deployment_perc
+    from (
+        select i.acct_id,
+        sum(i.normalized_host_count) nhc
+        from installations i
+        where i.product = '{prod}'
+        group by i.acct_id) as hc
+    join (
+        select i.acct_id,
+        max(i.licenses_purchased) quan
+        from installations i
+        where i.product = '{prod}'
+        group by i.acct_id) as ss on hc.acct_id = ss.acct_id
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
+    # Products owned
+    query = f"""
+    select i.acct_id,
+    GROUP_CONCAT(DISTINCT i.product) || "," || group_concat(DISTINCT s.product)
+    from installations i
+    left join subscriptions s on i.acct_id = s.acct_id
+    where i.product = '{prod}'
+    group by i.acct_id
+    """
+    data = [list(i) for i in db.execute(query)]
+    replacements = (
+        ("cb protection", "AC"),
+        ("cb response", "EDR"),
+        ("cb response cloud", "HEDR"),
+        ("EDR cloud", "HEDR"),
+        ("cb threathunter", "EEDR"),
+        ("cb defense", "ES"),
+        ("carbon black endpoint standard", "ES"),
+        ("cb liveops", "Live Ops"),
+        ("cb workload", "Workloads"),
+        ("cb threatsight", "ThreatSight"),
+        ("endpoint enterprise", "Endpoint Enterprise"),
+        ("endpoint advanced", "Endpoint Advanced"),
+        ("vmware workspace security", "Workspace Security"),
+        ("carbon black ", "")
+    )
+    for row in data:
+        if not row[1]: continue
+        prods = list(set(row[1].lower().split(",")))
+        for rpl in replacements:
+            prods = [i.replace(rpl[0], rpl[1]) for i in prods]
+            row[1] = ", ".join(prods)
+    for acct_id in rows:
+        rows[acct_id]["products"] = None
+    for acct_id, products in data:
+        if acct_id in rows:
+            rows[acct_id]["products"] = products
+    fields = ["acct_id"] + list(rows[list(rows)[0]].keys())
+    rows = [[acct_id] + list(rows[acct_id].values()) for acct_id in rows]
+    for i in fields: print(f"{i} TEXT,")
+    #print(json.dumps(rows, indent=2))
 
 def write_report(product, data):
     db = sqlite_db("onprem_products.db")
@@ -520,15 +760,16 @@ def write_report(product, data):
     writerows(wb, sheet, data)
     product_groups = [i[0] for i in db.execute("select distinct type from opportunities")]
     products = set([product for products in product_groups for product in products.split(";")])
-    for i in products: print(i)
     wb.close()
 
 if __name__ == "__main__":
-    for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
-        inst_data = create_inst_master(sqlite_db("onprem_products.db"), prod)
-        write_report(prod, inst_data)
-    import sys
-    sys.exit(1)
+    #for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
+    #    db = sqlite_db("onprem_products.db")
+    #    acct_data = create_acct_master(db, prod)
+    #    inst_data = create_inst_master(db, prod)
+    #    write_report(prod, inst_data)
+    #import sys
+    #sys.exit(1)
     table_creations()
     rd = report_data()
     rd.get_activity()
@@ -541,4 +782,3 @@ if __name__ == "__main__":
     rd.deployment_percentage()
     rd.air_gapped()
     rd.product_family()
-    #write_report()
