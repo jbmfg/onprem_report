@@ -748,28 +748,98 @@ def create_acct_master(db, prod):
             rows[acct_id]["products"] = products
     fields = ["acct_id"] + list(rows[list(rows)[0]].keys())
     rows = [[acct_id] + list(rows[acct_id].values()) for acct_id in rows]
-    for i in fields: print(f"{i} TEXT,")
-    #print(json.dumps(rows, indent=2))
+    db.insert("acct_summary", fields, rows)
 
-def write_report(product, data):
-    db = sqlite_db("onprem_products.db")
+def write_report(db, product):
     lookup = {"Cb Response Cloud": "HEDR", "Cb Protection": "AC", "Cb Response": "EDR"}
     type_lookup = {"Cb Response Cloud": "cbrc", "Cb Protection": "cbp", "Cb Response": "cbr"}
     wb = xlsxwriter.Workbook(f"{product}_Consumption Report.xlsx")
-    sheet = wb.add_worksheet("Installations")
+
+    # Account Level
+    sheet = wb.add_worksheet("Accounts")
+    query = f"""
+    select
+    account_name as "Account",
+    products as "Products Owned",
+    renewal_date as "Next Renewal",
+    renewal_qt as "Renewal Qt",
+    forecast as "Renwewal Forecast",
+    tier as "Tier",
+    csm as "CSM",
+    cse as "CSE",
+    arr as "ARR",
+    product_acv as "Product ACV",
+    csm_score as "CSM Score",
+    gs_score as "GS Score",
+    csm_comments as "CSM Comments",
+    adoption_comments as "Adoption Comments",
+    last_timeline as "Latest CSE Activity",
+    product_usage_analytics as "Last CUA",
+    tech_assessment as "Last TA",
+    csa_whiteboarding as "Last WB",
+    connected_count as "Normalized Endpoints",
+    disconnected_count as "Disconnected Endpoints",
+    licenses_purchased as "Licenses",
+    sub_deployment_perc as "Deployment(Sub)",
+    inst_deployment_perc as "Deployment(Inst)",
+    acct_id as "Account ID"
+    from acct_summary
+    where product = '{prod}'
+    order by account_name;
+    """
+    data = db.execute_dict(query)
+    header = [i for i in data[0].keys()]
+    data.insert(0, header)
     writerows(wb, sheet, data)
-    product_groups = [i[0] for i in db.execute("select distinct type from opportunities")]
-    products = set([product for products in product_groups for product in products.split(";")])
+
+    # Installation Level
+    sheet = wb.add_worksheet("Installations")
+    query = f"""
+    select
+    account_name as "Account",
+    close_date as "Next Renewal",
+    renewal_qt as "Renewal Qt",
+    forecast as "Renwewal Forecast",
+    opp_count as "Renewal Opps",
+    tier as "Tier",
+    csm as "CSM",
+    cse as "CSE",
+    arr as "ARR",
+    sub_product_arr as "ARR(Sub)",
+    opp_acv as "Product ACV",
+    csm_score as "CSM Score",
+    gs_score as "GS Score",
+    csm_comments as "CSM Comments",
+    adoption_comments as "Adoption Comments",
+    last_timeline as "Latest CSE Activity",
+    product_usage_analytics as "Last CUA",
+    tech_assessment as "Last TA",
+    csa_whiteboarding as "Last WB",
+    licenses_purchased as "Licenses",
+    normalized_host_count as "Normalized Endpoints",
+    deployment as "Deployment",
+    last_contact as "Last Contact",
+    air_gapped as "Connected",
+    inst_id as "Installation ID",
+    acct_id as "Account ID"
+    from inst_summary
+    where product = '{prod}'
+    order by account_name;
+    """
+    data = db.execute_dict(query)
+    header = [i for i in data[0].keys()]
+    data.insert(0, header)
+    writerows(wb, sheet, data)
     wb.close()
 
 if __name__ == "__main__":
-    #for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
-    #    db = sqlite_db("onprem_products.db")
-    #    acct_data = create_acct_master(db, prod)
-    #    inst_data = create_inst_master(db, prod)
-    #    write_report(prod, inst_data)
-    #import sys
-    #sys.exit(1)
+    for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
+        db = sqlite_db("onprem_products.db")
+        #acct_data = create_acct_master(db, prod)
+        #inst_data = create_inst_master(db, prod)
+        write_report(db, prod)
+    import sys
+    sys.exit(1)
     table_creations()
     rd = report_data()
     rd.get_activity()
