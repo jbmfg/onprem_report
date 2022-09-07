@@ -49,12 +49,13 @@ class report_data(object):
         i.normalized_host_count__c,
         i.last_contact__c,
         i.account__c,
-        i.product_group__c
+        i.product_group__c,
+        i.sid__c
         from edw_tesseract.sbu_ref_sbusfdc.installation__c i
         where i.installation_18_digit_id__c in ({self.inst_ids})
         """
         data = self.sfdb.execute(query)
-        fields = ("inst_id", "licenses_purchased", "normalized_host_count", "last_contact", "acct_id", "product")
+        fields = ("inst_id", "licenses_purchased", "normalized_host_count", "last_contact", "acct_id", "product", "sid")
         self.db.update("installations", fields, data)
 
     def get_account_translation(self):
@@ -82,15 +83,17 @@ class report_data(object):
         a.GS_Overall_Score__c,
         a.gs_adoption_comments__c,
         csm.name,
+        man.name,
         cse.name
         from edw_tesseract.sbu_ref_sbusfdc.account a
         left join edw_tesseract.sbu_ref_sbusfdc.user_sbu csm on a.Assigned_CP__c = csm.Id
+        left join edw_tesseract.sbu_ref_sbusfdc.user_sbu man on csm.managerid = man.id
         left join edw_tesseract.sbu_ref_sbusfdc.user_sbu cse on a.Customer_Success_Engineer__c = cse.Id
         where a.account_id_18_digits__c in ({accts})
         """
         data = self.sfdb.execute(query)
         fields = ["acct_id", "tier", "arr", "account_name", "csm_score", "csm_comments"]
-        fields += ["gs_score", "adoption_comments", "csm", "cse"]
+        fields += ["gs_score", "adoption_comments", "csm", "csm_manager", "cse"]
         self.db.insert("accounts", fields, data)
 
     def get_opportunity_info(self):
@@ -284,7 +287,8 @@ def table_creations():
     last_contact STRING,
     acct_id STRING,
     product STRING,
-    air_gapped INTEGER DEFAULT Null CHECK (typeof(air_gapped) in ('integer', Null))
+    air_gapped INTEGER DEFAULT Null CHECK (typeof(air_gapped) in ('integer', Null)),
+    sid STRING DEFAULT Null
     );
     """
     db.execute(query)
@@ -301,6 +305,7 @@ def table_creations():
     gs_score INTEGER DEFAULT 0 CHECK (typeof(gs_score) in ('integer', Null)),
     adoption_comments TEXT,
     csm TEXT,
+    csm_manager TEXT,
     cse TEXT
     );
     """
@@ -350,6 +355,7 @@ def table_creations():
     query = """
     CREATE table inst_summary (
     inst_id TEXT,
+    sid TEXT,
     licenses_purchased INTEGER DEFAULT 0 CHECK (typeof(licenses_purchased) in ('integer', Null)),
     normalized_host_count INTEGER DEFAULT 0 CHECK (typeof(normalized_host_count) in ('integer', Null)),
     deployment REAL DEFAULT 0 CHECK (typeof(deployment) in ('REAL', Null)),
@@ -365,6 +371,7 @@ def table_creations():
     gs_score INTEGER DEFAULT 0 CHECK (typeof(gs_score) in ('integer', Null)),
     adoption_comments TEXT,
     csm TEXT,
+    csm_manager TEXT,
     cse TEXT,
     close_date TEXT,
     renewal_qt TEXT,
@@ -390,6 +397,7 @@ def table_creations():
     gs_score INTEGER DEFAULT 0 CHECK (typeof(gs_score) in ('integer', Null)),
     adoption_comments TEXT,
     csm TEXT,
+    csm_manager TEXT,
     cse TEXT,
     product TEXT,
     last_timeline TEXT,
@@ -766,6 +774,7 @@ def write_report(db, product):
     forecast as "Renwewal Forecast",
     tier as "Tier",
     csm as "CSM",
+    csm_manager as "CSM Manager",
     cse as "CSE",
     arr as "ARR",
     product_acv as "Product ACV",
@@ -803,6 +812,7 @@ def write_report(db, product):
     opp_count as "Renewal Opps",
     tier as "Tier",
     csm as "CSM",
+    csm_manager as "CSM Manager",
     cse as "CSE",
     arr as "ARR",
     sub_product_arr as "ARR(Sub)",
@@ -821,6 +831,7 @@ def write_report(db, product):
     last_contact as "Last Contact",
     air_gapped as "Connected",
     inst_id as "Installation ID",
+    sid as "SID",
     acct_id as "Account ID"
     from inst_summary
     where product = '{prod}'
@@ -835,8 +846,8 @@ def write_report(db, product):
 if __name__ == "__main__":
     for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
         db = sqlite_db("onprem_products.db")
-        #acct_data = create_acct_master(db, prod)
-        #inst_data = create_inst_master(db, prod)
+        acct_data = create_acct_master(db, prod)
+        inst_data = create_inst_master(db, prod)
         write_report(db, prod)
     import sys
     sys.exit(1)
