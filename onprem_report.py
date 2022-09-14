@@ -50,12 +50,16 @@ class report_data(object):
         i.last_contact__c,
         i.account__c,
         i.product_group__c,
-        i.sid__c
+        i.sid__c,
+        i.monitor_count__c,
+        i.block_ask_count__c,
+        i.lockdown_count__c
         from edw_tesseract.sbu_ref_sbusfdc.installation__c i
         where i.installation_18_digit_id__c in ({self.inst_ids})
         """
         data = self.sfdb.execute(query)
-        fields = ("inst_id", "licenses_purchased", "normalized_host_count", "last_contact", "acct_id", "product", "sid")
+        fields = ("inst_id", "licenses_purchased", "normalized_host_count", "last_contact", "acct_id", "product",\
+                 "sid", "le", "me", "he")
         self.db.update("installations", fields, data)
 
     def get_account_translation(self):
@@ -229,16 +233,37 @@ class report_data(object):
         fields = ("inst_id", "deployment")
         self.db.update("installations", fields, deployments)
 
+    def enforcement_levels(self):
+        for el in ("le", "me", "he"):
+            query = f"select inst_id, {el}, licenses_purchased from installations;"
+            data = self.db.execute(query)
+            percs = []
+            for i in data:
+                if i[1] == 0:
+                    perc = "0%"
+                elif i[1] is not None and i[2]:
+                    perc = f"{round(i[1]/i[2] * 100, 2)}%"
+                else:
+                    continue
+                percs.append([i[0], perc])
+            fields = ("inst_id", f"{el}_perc")
+            self.db.update("installations", fields, percs)
+
     def air_gapped(self):
-        query = """
-        select
-        i.inst_id,
-        case when i.last_contact > DATE('NOW', '-5 Days') then False else True end
-        from installations i ;
-        """
-        data = self.db.execute(query)
-        fields = ("inst_id", "air_gapped")
-        self.db.update("installations", fields, data)
+        for product in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
+            query = f"""
+            select
+            i.inst_id,
+            case
+            when i.last_contact >
+                DATE((select max(last_contact) from installations where product = '{product}'), '-5 Days')
+                then False else True end
+            from installations i
+            where i.product = '{product}';
+            """
+            data = self.db.execute(query)
+            fields = ("inst_id", "air_gapped")
+            self.db.update("installations", fields, data)
 
     def product_family(self):
         query = "select distinct type from opportunities;"
@@ -288,7 +313,13 @@ def table_creations():
     acct_id STRING,
     product STRING,
     air_gapped INTEGER DEFAULT Null CHECK (typeof(air_gapped) in ('integer', Null)),
-    sid STRING DEFAULT Null
+    sid STRING DEFAULT Null,
+    le INTEGER DEFAULT 0 CHECK (typeof(le) in ('integer', Null)),
+    le_perc TEXT DEFAULT NULL,
+    me INTEGER DEFAULT 0 CHECK (typeof(me) in ('integer', Null)),
+    me_perc TEXT DEFAULT NULL,
+    he INTEGER DEFAULT 0 CHECK (typeof(he) in ('integer', Null)),
+    he_perc TEXT DEFAULT NULL
     );
     """
     db.execute(query)
@@ -342,6 +373,7 @@ def table_creations():
     """
     db.execute(query)
 
+    # CTAs
     query = """
     CREATE table ctas(
     acct_id TEXT,
@@ -352,6 +384,7 @@ def table_creations():
     """
     db.execute(query)
 
+    # Installation Summary
     query = """
     CREATE table inst_summary (
     inst_id TEXT,
@@ -359,6 +392,12 @@ def table_creations():
     licenses_purchased INTEGER DEFAULT 0 CHECK (typeof(licenses_purchased) in ('integer', Null)),
     normalized_host_count INTEGER DEFAULT 0 CHECK (typeof(normalized_host_count) in ('integer', Null)),
     deployment REAL DEFAULT 0 CHECK (typeof(deployment) in ('REAL', Null)),
+    le INTEGER DEFAULT 0 CHECK (typeof(le) in ('integer', Null)),
+    le_perc TEXT DEFAULT NULL,
+    me INTEGER DEFAULT 0 CHECK (typeof(me) in ('integer', Null)),
+    me_perc TEXT DEFAULT NULL,
+    he INTEGER DEFAULT 0 CHECK (typeof(he) in ('integer', Null)),
+    he_perc TEXT DEFAULT NULL,
     last_contact TEXT,
     acct_id TEXT,
     product TEXT,
@@ -413,63 +452,68 @@ def table_creations():
     licenses_purchased INTEGER DEFAULT 0 CHECK (typeof(licenses_purchased) in ('integer', Null)),
     sub_deployment_perc REAL DEFAULT 0 CHECK (typeof(sub_deployment_perc) in ('REAL', Null)),
     inst_deployment_perc REAL DEFAULT 0 CHECK (typeof(inst_deployment_perc) in ('REAL', Null)),
+    le INTEGER DEFAULT 0 CHECK (typeof(le) in ('integer', Null)),
+    le_perc TEXT DEFAULT NULL,
+    me INTEGER DEFAULT 0 CHECK (typeof(me) in ('integer', Null)),
+    me_perc TEXT DEFAULT NULL,
+    he INTEGER DEFAULT 0 CHECK (typeof(he) in ('integer', Null)),
+    he_perc TEXT DEFAULT NULL,
     products TEXT);
     """
     db.execute(query)
 
 def writerows(wb, sheet, data, linkBool=False, setwid=True, col1url=False, bolder=False):
-        bold = wb.add_format({"bold": True})
-        # first get the length of the longest sting to set column widths
-        numCols = len(data[0])
-        widest = [10 for _ in range(numCols)]
-        if setwid:
-            try:
-                for i in data:
-                    for x in range(len(data[0])):
-                        if type(i[x]) == int:
-                            pass
-                        elif i[x] is None:
-                            pass
-                        elif not isinstance(i[x], float) and widest[x] < len(i[x].encode("ascii", "ignore")):
-                            if len(str(i[x])) > 50:
-                                widest[x] = 50
-                            else:
-                                widest[x] = len(str(i[x])) #+ 4
-            except IndexError:
+    bold = wb.add_format({"bold": True})
+    # first get the length of the longest sting to set column widths
+    numCols = len(data[0])
+    widest = [10 for _ in range(numCols)]
+    if setwid:
+        try:
+            for i in data:
+                for x in range(len(data[0])):
+                    if type(i[x]) == int:
+                        pass
+                    elif i[x] is None:
+                        pass
+                    elif not isinstance(i[x], float) and widest[x] < len(i[x].encode("ascii", "ignore")):
+                        if len(str(i[x])) > 50:
+                            widest[x] = 50
+                        else:
+                            widest[x] = len(str(i[x])) #+ 4
+        except IndexError:
+            pass
+            # print ("--INFO-- Index Error when setting column widths")
+        except TypeError:
+            print ("type error")
+        except AttributeError:
+            # Added check for floats above so this probably isnt needed any more
+            print ("\n--INFO-- Can't encode a float\n")
+
+    for x, i in enumerate(widest):
+        sheet.set_column(x, x, i)
+
+    # Then write the data
+    for r in data:
+        for i in r:
+            if type(i) == str:
+                i = i.encode("ascii", "ignore")
+    counter = 0
+    for x, r in enumerate(data):
+        counter += 1
+        cell = "A" +str(counter)
+        if bolder and (data[x-1] == "" or x==0):
+            sheet.write_row(cell, r, bold)
+        else:
+            sheet.write_row(cell, r)
+        if col1url:
+            if x == 0:
                 pass
-                # print ("--INFO-- Index Error when setting column widths")
-            except TypeError:
-                print ("type error")
-            except AttributeError:
-                # Added check for floats above so this probably isnt needed any more
-                print ("\n--INFO-- Can't encode a float\n")
-
-        for x, i in enumerate(widest):
-            sheet.set_column(x, x, i)
-
-        # Then write the data
-        for r in data:
-            for i in r:
-                if type(i) == str:
-                    i = i.encode("ascii", "ignore")
-        counter = 0
-        for x, r in enumerate(data):
-            counter += 1
-            cell = "A" +str(counter)
-            if bolder and (data[x-1] == "" or x==0):
-                sheet.write_row(cell, r, bold)
             else:
-                sheet.write_row(cell, r)
-            if col1url:
-                if x == 0:
-                    pass
-                else:
-                    sheet_name = f"{x-1}. {r[0]}"[:31]
-                    #sheet.write_url(cell, "internal:'{}'!A1".format("{}. {}".format(x,str(r[0]).replace("'","''"))[:31]), string=r[0])
-                    sheet.write_url(cell, f"internal:'{sheet_name}'!A1", string=r[0])
-            if linkBool:
-                sheet.write_url(0, 6, "internal:Master!A1", string="Mastersheet")
-        return True
+                sheet_name = f"{x-1}. {r[0]}"[:31]
+                sheet.write_url(cell, f"internal:'{sheet_name}'!A1", string=r[0])
+        if linkBool:
+            sheet.write_url(0, 6, "internal:Master!A1", string="Mastersheet")
+    return True
 
 def create_inst_master(db, prod):
     def add_metric(data_dict, new_data):
@@ -717,6 +761,23 @@ def create_acct_master(db, prod):
     data = db.execute_dict(query)
     add_metric(rows, data)
 
+    # Enforcement Levels
+    query = f"""
+    select i.acct_id,
+    sum(i.le) as le,
+    round(cast(sum(i.le) as real) / max(i.licenses_purchased) * 100, 2) as le_perc,
+    sum(i.me) as me,
+    round(cast(sum(i.me) as real) / max(i.licenses_purchased) * 100, 2) as me_perc,
+    sum(i.he) as he,
+    round(cast(sum(i.he) as real) / max(i.licenses_purchased) * 100, 2) as he_perc
+    from installations i
+    where i.product = '{prod}'
+    and i.air_gapped = 0
+    group by i.acct_id;
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+
     # Products owned
     query = f"""
     select i.acct_id,
@@ -761,7 +822,7 @@ def create_acct_master(db, prod):
 def write_report(db, product):
     lookup = {"Cb Response Cloud": "HEDR", "Cb Protection": "AC", "Cb Response": "EDR"}
     type_lookup = {"Cb Response Cloud": "cbrc", "Cb Protection": "cbp", "Cb Response": "cbr"}
-    wb = xlsxwriter.Workbook(f"{product}_Consumption Report.xlsx")
+    wb = xlsxwriter.Workbook(f"Consumption Report_{product}.xlsx")
 
     # Account Level
     sheet = wb.add_worksheet("Accounts")
@@ -789,6 +850,12 @@ def write_report(db, product):
     connected_count as "Normalized Endpoints",
     disconnected_count as "Disconnected Endpoints",
     licenses_purchased as "Licenses",
+    le as "LE Count",
+    le_perc as "LE Perc",
+    me as "ME Count",
+    me_perc as "ME Perc",
+    he as "HE Count",
+    he_perc as "HE Perc",
     sub_deployment_perc as "Deployment(Sub)",
     inst_deployment_perc as "Deployment(Inst)",
     acct_id as "Account ID"
@@ -797,7 +864,22 @@ def write_report(db, product):
     order by account_name;
     """
     data = db.execute_dict(query)
+
+    # Clean up data that doesnt apply to the product
+    # Find the columns that are all empty and remove that index from the data and header
+    empties = []
+    for x in range(len(data[0])):
+        col = set([i[x] for i in data])
+        if not any(col):
+            empties.append(x)
     header = [i for i in data[0].keys()]
+    data = [list(i) for i in data]
+    for x in empties[::-1]:
+        header.pop(x)
+        for xx, i in enumerate(data):
+            data[xx].pop(x)
+
+
     data.insert(0, header)
     writerows(wb, sheet, data)
 
@@ -826,6 +908,12 @@ def write_report(db, product):
     tech_assessment as "Last TA",
     csa_whiteboarding as "Last WB",
     licenses_purchased as "Licenses",
+    le as "LE Count",
+    le_perc as "LE Perc",
+    me as "ME Count",
+    me_perc as "ME Perc",
+    he as "HE Count",
+    he_perc as "HE Perc",
     normalized_host_count as "Normalized Endpoints",
     deployment as "Deployment",
     last_contact as "Last Contact",
@@ -838,9 +926,24 @@ def write_report(db, product):
     order by account_name;
     """
     data = db.execute_dict(query)
+
+    # Clean up data that doesnt apply to the product
+    # Find the columns that are all empty and remove that index from the data and header
+    empties = []
+    for x in range(len(data[0])):
+        col = set([i[x] for i in data])
+        if not any(col):
+            empties.append(x)
     header = [i for i in data[0].keys()]
+    data = [list(i) for i in data]
+    for x in empties[::-1]:
+        header.pop(x)
+        for xx, i in enumerate(data):
+            data[xx].pop(x)
+
     data.insert(0, header)
     writerows(wb, sheet, data)
+
     wb.close()
 
 if __name__ == "__main__":
@@ -861,5 +964,6 @@ if __name__ == "__main__":
     rd.get_cta_info()
     rd.renewal_quarter()
     rd.deployment_percentage()
+    rd.enforcement_levels()
     rd.air_gapped()
     rd.product_family()
