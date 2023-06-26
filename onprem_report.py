@@ -24,12 +24,21 @@ class report_data(object):
         select i.installation_18_digit_id__c
         from edw_tesseract.sbu_ref_sbusfdc.installation__c i
         left join edw_tesseract.sbu_ref_sbusfdc.account a on i.account__c = a.id
-        where a.cs_tier__c in ('Low', 'Medium', 'High', 'Holding')
+        where  1=1
+        --and a.cs_tier__c in ('Low', 'Medium', 'High', 'Holding')
         and i.product_group__c in ('Cb Protection', 'Cb Response', 'Cb Response Cloud')
         and i.installation_type__c in ('Perpetual', 'Subscription')
         and i.install_type__c in ('Partner', 'MSSP - Cb Protection', 'IR - Carbon Black', 'Other', 'General Availability', 'Bit9 Deployment', 'Initial purchase')
         and (i.cb_cloud_status__c not in ('Destroyed', 'Shutdown') or i.cb_cloud_status__c is null)
         and (i.status__c in ('New', 'In-Progress', 'Complete') or i.status__c is null)
+        """
+        query = """
+        select distinct i.installation_18_digit_id__c
+        from edw_tesseract.sbu_ref_sbusfdc.installation__c i
+        left join edw_tesseract.sbu_ref_sbusfdc.bit9_subscriptions__c s on i.account__c = s.account__c
+        where  1=1
+        and s.active_subscription__c = True
+        and s.product_group__c in ('Cb Response Cloud')
         """
         data = self.sfdb.execute(query)
 
@@ -67,6 +76,7 @@ class report_data(object):
         select i.account__c, i.id from
         edw_tesseract.sbu_ref_sbusfdc.installation__c i
         where i.installation_18_digit_id__c in ({self.inst_ids})
+        and i.account__c is not Null
         """
         data = self.sfdb.execute(query)
         act_dict = defaultdict(list)
@@ -88,7 +98,11 @@ class report_data(object):
         a.gs_adoption_comments__c,
         csm.name,
         man.name,
-        cse.name
+        cse.name,
+        a.owner_name__c,
+        a.vmstar_geo__c,
+        a.vmstar_sub_division__c,
+        a.vmstar_cm_country__c
         from edw_tesseract.sbu_ref_sbusfdc.account a
         left join edw_tesseract.sbu_ref_sbusfdc.user_sbu csm on a.Assigned_CP__c = csm.Id
         left join edw_tesseract.sbu_ref_sbusfdc.user_sbu man on csm.managerid = man.id
@@ -97,7 +111,8 @@ class report_data(object):
         """
         data = self.sfdb.execute(query)
         fields = ["acct_id", "tier", "arr", "account_name", "csm_score", "csm_comments"]
-        fields += ["gs_score", "adoption_comments", "csm", "csm_manager", "cse"]
+        fields += ["gs_score", "adoption_comments", "csm", "csm_manager", "cse", "account_manager"]
+        fields += ["vmw_geo", "vmw_sub_div", "vmw_country"]
         self.db.insert("accounts", fields, data)
 
     def get_opportunity_info(self):
@@ -122,15 +137,15 @@ class report_data(object):
         accts = "'" + "', '".join(self.act_dict.keys()) + "'"
         query = f"""
         select account__c,
-        arr__c,
+        coalesce(arr__c, 0.0),
         end_date__c,
         id,
         product_description__c,
         product__c,
         product_group__c,
         quantity__c,
-        subscription_term__c,
-        tcv__c
+        coalesce(subscription_term__c, 0),
+        coalesce(tcv__c, 0.0)
         from edw_tesseract.sbu_ref_sbusfdc.bit9_subscriptions__c s
         where active_subscription__c = true
         and account__c in ({accts})
@@ -337,7 +352,11 @@ def table_creations():
     adoption_comments TEXT,
     csm TEXT,
     csm_manager TEXT,
-    cse TEXT
+    cse TEXT,
+    account_manager TEXT,
+    vmw_geo TEXT,
+    vmw_sub_div TEXT,
+    vmw_country TEXT
     );
     """
     db.execute(query)
@@ -421,7 +440,11 @@ def table_creations():
     product_usage_analytics TEXT,
     tech_assessment TEXT,
     csa_whiteboarding TEXT,
-    last_timeline TEXT);
+    last_timeline TEXT,
+    account_manager TEXT,
+    vmw_geo TEXT,
+    vmw_sub_div TEXT,
+    vmw_country TEXT);
     """
     db.execute(query)
 
@@ -458,7 +481,11 @@ def table_creations():
     me_perc TEXT DEFAULT NULL,
     he INTEGER DEFAULT 0 CHECK (typeof(he) in ('integer', Null)),
     he_perc TEXT DEFAULT NULL,
-    products TEXT);
+    products TEXT,
+    account_manager TEXT,
+    vmw_geo TEXT,
+    vmw_sub_div TEXT,
+    vmw_country TEXT);
     """
     db.execute(query)
 
@@ -689,20 +716,20 @@ def create_acct_master(db, prod):
 
     # Opportunities
     lookup = {
-        "Cb Cloud": ["CBWL", "CBVM", "CBWS", "CBD", "CBCO", "CBTS", "CBTH"],
-        "Cb Response Cloud": ["CBRC"],
-        "Cb Protection": ["CBP"],
+        "Cb Cloud": ["CBWL", "CBVM", "CBWS", "CBD", "CBCO", "CBTS", "CBTH", "Endpoint STD", "EEDR", "Endpoint"],
+        "Cb Response Cloud": ["Hosted EDR"],
+        "Cb Protection": ["CBP", "Application Control"],
         "Cb Response": ["CBR"]
     }
     query = f"""
     select a.acct_id,
     group_concat(o.close_date) as renewal_date,
     group_concat(o.renewal_qt) as renewal_qt,
-    group_concat(o.forecast) as forecast,
-    sum(o.acv) as product_acv
+    group_concat(o.forecast) as forecast --,
+    --sum(o.acv) as product_acv
     from accounts a
     left join opportunities o on a.acct_id = o.acct_id
-    where o.type like '%{", ".join(lookup[prod])}%'
+    where o.type like '%{"%, %".join(lookup[prod])}%'
     group by a.acct_id;
     """
     data = db.execute_dict(query)
@@ -711,7 +738,8 @@ def create_acct_master(db, prod):
     # purchased licenses from subscriptions
     query = f"""
     select acct_id,
-    sum(quantity) as licenses_purchased
+    sum(quantity) as licenses_purchased,
+    sum(arr) as product_acv
     from subscriptions
     where product = '{prod}'
     group by acct_id;
@@ -816,8 +844,17 @@ def create_acct_master(db, prod):
         if acct_id in rows:
             rows[acct_id]["products"] = products
     fields = ["acct_id"] + list(rows[list(rows)[0]].keys())
+    new_rows = []
+    for acct_id in rows:
+        row = [acct_id]
+        fields = ["acct_id"]
+        for key in rows[acct_id]:
+            fields.append(key)
+            row.append(rows[acct_id][key])
+        new_rows.append(row)
+
     rows = [[acct_id] + list(rows[acct_id].values()) for acct_id in rows]
-    db.insert("acct_summary", fields, rows)
+    db.insert("acct_summary", fields, new_rows)
 
 def write_report(db, product):
     lookup = {"Cb Response Cloud": "HEDR", "Cb Protection": "AC", "Cb Response": "EDR"}
@@ -837,6 +874,10 @@ def write_report(db, product):
     csm as "CSM",
     csm_manager as "CSM Manager",
     cse as "CSE",
+    account_manager as "Account Manager",
+    vmw_geo as "VMW Geo",
+    vmw_sub_div as "VMW Sub-division",
+    vmw_country as "VMW Country",
     arr as "ARR",
     product_acv as "Product ACV",
     csm_score as "CSM Score",
@@ -867,19 +908,17 @@ def write_report(db, product):
 
     # Clean up data that doesnt apply to the product
     # Find the columns that are all empty and remove that index from the data and header
+    header = [i for i in data[0].keys()]
     empties = []
     for x in range(len(data[0])):
         col = set([i[x] for i in data])
         if not any(col):
             empties.append(x)
-    header = [i for i in data[0].keys()]
     data = [list(i) for i in data]
     for x in empties[::-1]:
         header.pop(x)
         for xx, i in enumerate(data):
             data[xx].pop(x)
-
-
     data.insert(0, header)
     writerows(wb, sheet, data)
 
@@ -940,23 +979,16 @@ def write_report(db, product):
         header.pop(x)
         for xx, i in enumerate(data):
             data[xx].pop(x)
-
     data.insert(0, header)
     writerows(wb, sheet, data)
 
     wb.close()
 
 if __name__ == "__main__":
-    for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
-        db = sqlite_db("onprem_products.db")
-        acct_data = create_acct_master(db, prod)
-        inst_data = create_inst_master(db, prod)
-        write_report(db, prod)
-    import sys
-    sys.exit(1)
+    #for prod in ("Cb Protection", "Cb Response", "Cb Response Cloud"):
     table_creations()
     rd = report_data()
-    rd.get_activity()
+    #rd.get_activity()
     rd.get_installation_info()
     rd.get_account_info()
     rd.get_opportunity_info()
@@ -967,3 +999,8 @@ if __name__ == "__main__":
     rd.enforcement_levels()
     rd.air_gapped()
     rd.product_family()
+    for prod in ["Cb Response Cloud"]:
+        db = sqlite_db("onprem_products.db")
+        acct_data = create_acct_master(db, prod)
+        inst_data = create_inst_master(db, prod)
+        write_report(db, prod)
