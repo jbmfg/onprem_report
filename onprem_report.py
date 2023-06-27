@@ -62,13 +62,15 @@ class report_data(object):
         i.sid__c,
         i.monitor_count__c,
         i.block_ask_count__c,
-        i.lockdown_count__c
+        i.lockdown_count__c,
+        mp.name
         from edw_tesseract.sbu_ref_sbusfdc.installation__c i
+        left join edw_tesseract.sbu_ref_sbusfdc.account mp on i.monitoring_partner__c = mp.account_id_18_digits__c
         where i.installation_18_digit_id__c in ({self.inst_ids})
         """
         data = self.sfdb.execute(query)
         fields = ("inst_id", "licenses_purchased", "normalized_host_count", "last_contact", "acct_id", "product",\
-                 "sid", "le", "me", "he")
+                 "sid", "le", "me", "he", "monitoring_partner")
         self.db.update("installations", fields, data)
 
     def get_account_translation(self):
@@ -102,17 +104,19 @@ class report_data(object):
         a.owner_name__c,
         a.vmstar_geo__c,
         a.vmstar_sub_division__c,
-        a.vmstar_cm_country__c
+        a.vmstar_cm_country__c,
+        csp.name
         from edw_tesseract.sbu_ref_sbusfdc.account a
         left join edw_tesseract.sbu_ref_sbusfdc.user_sbu csm on a.Assigned_CP__c = csm.Id
         left join edw_tesseract.sbu_ref_sbusfdc.user_sbu man on csm.managerid = man.id
         left join edw_tesseract.sbu_ref_sbusfdc.user_sbu cse on a.Customer_Success_Engineer__c = cse.Id
+        left join edw_tesseract.sbu_ref_sbusfdc.account csp on a.cs_partner__c = csp.account_id_18_digits__c
         where a.account_id_18_digits__c in ({accts})
         """
         data = self.sfdb.execute(query)
         fields = ["acct_id", "tier", "arr", "account_name", "csm_score", "csm_comments"]
         fields += ["gs_score", "adoption_comments", "csm", "csm_manager", "cse", "account_manager"]
-        fields += ["vmw_geo", "vmw_sub_div", "vmw_country"]
+        fields += ["vmw_geo", "vmw_sub_div", "vmw_country", "cs_partner"]
         self.db.insert("accounts", fields, data)
 
     def get_opportunity_info(self):
@@ -334,7 +338,8 @@ def table_creations():
     me INTEGER DEFAULT 0 CHECK (typeof(me) in ('integer', Null)),
     me_perc TEXT DEFAULT NULL,
     he INTEGER DEFAULT 0 CHECK (typeof(he) in ('integer', Null)),
-    he_perc TEXT DEFAULT NULL
+    he_perc TEXT DEFAULT NULL,
+    monitoring_partner TEXT DEFAULT NULL
     );
     """
     db.execute(query)
@@ -356,7 +361,8 @@ def table_creations():
     account_manager TEXT,
     vmw_geo TEXT,
     vmw_sub_div TEXT,
-    vmw_country TEXT
+    vmw_country TEXT,
+    cs_partner TEXT
     );
     """
     db.execute(query)
@@ -444,10 +450,13 @@ def table_creations():
     account_manager TEXT,
     vmw_geo TEXT,
     vmw_sub_div TEXT,
-    vmw_country TEXT);
+    vmw_country TEXT,
+    monitoring_partner TEXT DEFAULT NULL,
+    cs_partner TEXT DEFAULT NULL);
     """
     db.execute(query)
 
+    # account summary
     query = """
     CREATE TABLE acct_summary (
     acct_id TEXT,
@@ -485,7 +494,9 @@ def table_creations():
     account_manager TEXT,
     vmw_geo TEXT,
     vmw_sub_div TEXT,
-    vmw_country TEXT);
+    vmw_country TEXT,
+    monitoring_partner TEXT DEFAULT NULL,
+    cs_partner TEXT DEFAULT NULL);
     """
     db.execute(query)
 
@@ -705,7 +716,8 @@ def create_acct_master(db, prod):
     query = f"""
     select a.acct_id,
     sum(case when i.air_gapped = 0 then i.normalized_host_count end) as connected_count,
-    sum(case when i.air_gapped = 1 then i.normalized_host_count end) as disconnected_count
+    sum(case when i.air_gapped = 1 then i.normalized_host_count end) as disconnected_count,
+    group_concat(distinct i.monitoring_partner) as monitoring_partner
     from accounts a
     left join installations i on a.acct_id = i.acct_id
     where i.product = '{prod}'
@@ -871,6 +883,8 @@ def write_report(db, product):
     renewal_qt as "Renewal Qt",
     forecast as "Renwewal Forecast",
     tier as "Tier",
+    --monitoring_partner || ", " || cs_partner as "Partner",
+    cs_partner as "Partner",
     csm as "CSM",
     csm_manager as "CSM Manager",
     cse as "CSE",
@@ -905,7 +919,7 @@ def write_report(db, product):
     order by account_name;
     """
     data = db.execute_dict(query)
-
+    
     # Clean up data that doesnt apply to the product
     # Find the columns that are all empty and remove that index from the data and header
     header = [i for i in data[0].keys()]
