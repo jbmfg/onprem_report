@@ -63,6 +63,7 @@ class report_data(object):
         i.monitor_count__c,
         i.block_ask_count__c,
         i.lockdown_count__c,
+        LOWER(i.carbon_black_alias__c),
         mp.name
         from edw_tesseract.sbu_ref_sbusfdc.installation__c i
         left join edw_tesseract.sbu_ref_sbusfdc.account mp on i.monitoring_partner__c = mp.account_id_18_digits__c
@@ -70,7 +71,7 @@ class report_data(object):
         """
         data = self.sfdb.execute(query)
         fields = ("inst_id", "licenses_purchased", "normalized_host_count", "last_contact", "acct_id", "product",\
-                 "sid", "le", "me", "he", "monitoring_partner")
+                 "sid", "le", "me", "he", "cb_alias", "monitoring_partner")
         self.db.update("installations", fields, data)
 
     def get_account_translation(self):
@@ -289,8 +290,19 @@ class report_data(object):
         data = [i[0] for i in self.db.execute(query)]
         products = set([i for prods in data for i in prods.split(";")])
 
+    def get_s3(self):
+        xlsx_file = "HEDR Hosted S3 Buckets.xlsx"
+        data = []
+        wb = openpyxl.load_workbook(xlsx_file, data_only=True)
+        s = wb["Instances"]
+        for x, i in enumerate(s.rows):
+            alias = s.cell(row=x+1, column=1).value.lower().replace("-", "_")
+            bucket = s.cell(row=x+1, column=2).value
+            data.append([alias, bucket])
+        fields = ("alias", "s3_bucket_name")
+        self.db.insert("s3", fields, data)
+
     def get_activity(self):
-        xlsx_files = [i for i in os.listdir() if i.endswith(".xlsx") and i.startswith("Distinct")]
         data = []
         for f in xlsx_files:
             wb = openpyxl.load_workbook(f, data_only=True)
@@ -309,7 +321,7 @@ class report_data(object):
 def table_creations():
     db = sqlite_db("onprem_products.db")
     for table in ("installations", "accounts", "opportunities", "subscriptions",\
-                  "cse_activity", "ctas", "inst_summary", "acct_summary"):
+                  "cse_activity", "ctas", "inst_summary", "acct_summary", "s3"):
         db.execute(f"drop table if exists {table};")
 
     # CSE Timeline Activities
@@ -339,6 +351,7 @@ def table_creations():
     me_perc TEXT DEFAULT NULL,
     he INTEGER DEFAULT 0 CHECK (typeof(he) in ('integer', Null)),
     he_perc TEXT DEFAULT NULL,
+    cb_alias TEXT DEFAULT NULL,
     monitoring_partner TEXT DEFAULT NULL
     );
     """
@@ -452,6 +465,7 @@ def table_creations():
     vmw_sub_div TEXT,
     vmw_country TEXT,
     monitoring_partner TEXT DEFAULT NULL,
+    cb_alias TEXT DEFAULT NULL,
     cs_partner TEXT DEFAULT NULL);
     """
     db.execute(query)
@@ -496,7 +510,17 @@ def table_creations():
     vmw_sub_div TEXT,
     vmw_country TEXT,
     monitoring_partner TEXT DEFAULT NULL,
-    cs_partner TEXT DEFAULT NULL);
+    cs_partner TEXT DEFAULT NULL,
+    cb_alias TEXT DEFAULT NULL,
+    s3_bucket INTEGER DEFAULT 0);
+    """
+    db.execute(query)
+
+    # S3 buckets
+    query = """
+    CREATE TABLE s3 (
+        alias TEXT DEFAULT NULL,
+        s3_bucket_name TEXT DEFAULT NULL);
     """
     db.execute(query)
 
@@ -717,7 +741,8 @@ def create_acct_master(db, prod):
     select a.acct_id,
     sum(case when i.air_gapped = 0 then i.normalized_host_count end) as connected_count,
     sum(case when i.air_gapped = 1 then i.normalized_host_count end) as disconnected_count,
-    group_concat(distinct i.monitoring_partner) as monitoring_partner
+    group_concat(distinct i.monitoring_partner) as monitoring_partner,
+    group_concat(distinct i.cb_alias) as cb_alias
     from accounts a
     left join installations i on a.acct_id = i.acct_id
     where i.product = '{prod}'
@@ -725,6 +750,20 @@ def create_acct_master(db, prod):
     """
     data = db.execute_dict(query)
     add_metric(rows, data)
+
+    # s3
+    query = f"""
+    select a.acct_id,
+    case when s3.alias is Null then 0 else 1 end as s3_bucket
+    from accounts a
+    left join installations i on a.acct_id = i.acct_id
+    left join s3 on i.cb_alias = s3.alias
+    where i.product = '{prod}'
+    group by a.acct_id;
+    """
+    data = db.execute_dict(query)
+    add_metric(rows, data)
+    print(query)
 
     # Opportunities
     lookup = {
@@ -913,6 +952,7 @@ def write_report(db, product):
     he_perc as "HE Perc",
     sub_deployment_perc as "Deployment(Sub)",
     inst_deployment_perc as "Deployment(Inst)",
+    s3_bucket as "Have S3 Bucket",
     acct_id as "Account ID"
     from acct_summary
     where product = '{prod}'
@@ -1012,6 +1052,7 @@ if __name__ == "__main__":
     rd.deployment_percentage()
     rd.enforcement_levels()
     rd.air_gapped()
+    rd.get_s3()
     rd.product_family()
     for prod in ["Cb Response Cloud"]:
         db = sqlite_db("onprem_products.db")
